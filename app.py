@@ -2,23 +2,21 @@ import streamlit as st
 import urllib.request
 import re
 import os
-import sys
 import json
 import random
 import datetime
-import subprocess
 
 # ---------------------------------------------------------------
-# ตั้งค่าพาธบันทึกไฟล์ & HEADERS
+# HEADERS สไตล์ Mobile App ให้ Lazada ปล่อยข้อมูล
 # ---------------------------------------------------------------
-SAVE_ROOT = os.path.join(os.path.expanduser("~"), "Documents", "Lazada_Posts")
-
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
     ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "th-TH,th;q=0.9,en;q=0.8",
+    "Referer": "https://www.lazada.co.th/",
 }
 
 CAPTION_STYLES = {
@@ -57,9 +55,6 @@ HASHTAG_GROUPS = [
     "#Lazadaส่งฟรี #ช้อปปิ้งออนไลน์ #ของอร่อยบอกต่อ #ป้ายยาวันนี้"
 ]
 
-# ---------------------------------------------------------------
-# ฟังก์ชันช่วย (Scraper & Download Engine)
-# ---------------------------------------------------------------
 def clean_title(text):
     if not text or text.startswith("http://") or text.startswith("https://"):
         return ""
@@ -82,6 +77,7 @@ def extract_lazada_media(url):
         with urllib.request.urlopen(req, timeout=15) as resp:
             page = resp.read().decode('utf-8', errors='replace')
         
+        # 1. ลองดึงจาก moduleData
         json_match = re.search(r'window\.__moduleData__\s*=\s*(\{.*?\});', page, re.S)
         if json_match:
             try:
@@ -99,46 +95,33 @@ def extract_lazada_media(url):
             except Exception:
                 pass
 
+        # 2. ถ้าดึงชื่อไม่ได้ ดึงจาก Meta Title
         if not title:
             title_match = re.search(r'<title>(.*?)</title>', page, re.I | re.S)
             if title_match:
                 raw_title = title_match.group(1).split('|')[0].split('-')[0].strip()
                 title = clean_title(raw_title)
 
-        if not images:
-            raw_imgs = re.findall(r'https?://[^"\'\s\\<>]+?\.(?:jpg|jpeg|png)', page, re.I)
-            for u in raw_imgs:
-                if ("slatic.net/p/" in u or "lazcdn.com/g/p/" in u) and "template" not in u:
-                    full_img = re.sub(r'_\d+x\d+\.(jpg|png|jpeg)', '', u)
-                    images.append(full_img)
+        # 3. Fallback ดึงรูปจาก og:image หรือ Regex สแกนทั้งหน้าเว็บ
+        og_imgs = re.findall(r'<meta property="og:image" content="(.*?)"', page, re.I)
+        for img in og_imgs:
+            if img.startswith("//"):
+                img = "https:" + img
+            images.append(img)
 
+        raw_imgs = re.findall(r'https?://[^"\'\s\\<>]+?\.(?:jpg|jpeg|png)', page, re.I)
+        for u in raw_imgs:
+            if ("slatic.net/p/" in u or "lazcdn.com/g/p/" in u) and "template" not in u:
+                full_img = re.sub(r'_\d+x\d+\.(jpg|png|jpeg)', '', u)
+                images.append(full_img)
+
+        # 4. ดึงคลิปวิดีโอ
         raw_vids = re.findall(r'https?://[^"\'\s\\<>]+?\.mp4[^"\'\s\\<>]*', page, re.I)
         videos = [v.replace("\\/", "/") for v in raw_vids]
 
     except Exception:
         pass
     return unique_keep_order(images)[:9], unique_keep_order(videos)[:3], title
-
-def download_file(url, path):
-    req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=60) as resp, open(path, "wb") as f:
-        while True:
-            chunk = resp.read(256 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
-
-def safe_name(text):
-    text = re.sub(r'[\\/:*?"<>|\r\n]', "", text).strip()
-    return text[:40] or "product"
-
-def open_folder(path):
-    if sys.platform.startswith("win"):
-        os.startfile(path)
-    elif sys.platform == "darwin":
-        subprocess.call(["open", path])
-    else:
-        subprocess.call(["xdg-open", path])
 
 def build_caption(style, name, point, price, aff_link, link_header):
     template = CAPTION_STYLES.get(style, CAPTION_STYLES["🔥 ป้ายยาจัดเต็ม (ภาษาเพื่อนกัน)"])
@@ -160,26 +143,29 @@ def build_caption(style, name, point, price, aff_link, link_header):
     return "\n".join(lines)
 
 # ---------------------------------------------------------------
-# หน้าจอโปรแกรม (Streamlit Web UI)
+# Streamlit Web UI (ปรับให้ใช้บนมือถือง่ายขึ้น)
 # ---------------------------------------------------------------
 st.set_page_config(page_title="LAZ HELPER v3.0", page_icon="⚡", layout="centered")
 
-st.title("⚡ LAZ HELPER v3.0")
-st.caption("ตัวช่วยทำโพสต์ Affiliate แบบครบวงจร (สร้างแคปชั่น + ดึงรูป/คลิป)")
+st.title("⚡ LAZ HELPER v3.0 (Mobile Ready)")
+st.caption("ตัวช่วยทำโพสต์ Affiliate บนมือถือ (เจนแคปชั่น + แสดงรูปให้บันทึก)")
 
 aff_link = st.text_input("1. ลิงก์ Affiliate ของคุณ (ลิงก์สั้น):", placeholder="https://s.lazada.co.th/s.xxx")
 prod_link = st.text_input("2. ลิงก์สินค้าธรรมดา (ไว้ดึงรูป/คลิป/ชื่อ):", placeholder="https://www.lazada.co.th/products/...")
 
-if st.button("🔍 ดึงข้อมูลสินค้าออโต้"):
+if st.button("🔍 ดึงข้อมูลสินค้าออโต้", use_container_width=True):
     if prod_link:
-        with st.spinner("กำลังดึงข้อมูลรูปภาพ วิดีโอ และชื่อสินค้า..."):
+        with st.spinner("กำลังดึงข้อมูล..."):
             imgs, vids, extracted_title = extract_lazada_media(prod_link)
             st.session_state["fetched_imgs"] = imgs
             st.session_state["fetched_vids"] = vids
             if extracted_title:
                 st.session_state["product_name"] = extracted_title
             
-            st.success(f"ดึงข้อมูลสำเร็จ! พบรูปภาพ {len(imgs)} รูป / คลิปวิดีโอ {len(vids)} ไฟล์")
+            if imgs or vids:
+                st.success(f"ดึงข้อมูลสำเร็จ! พบรูปภาพ {len(imgs)} รูป / คลิปวิดีโอ {len(vids)} ไฟล์")
+            else:
+                st.warning("⚠️ ไม่พบรูปออโต้จากเซิร์ฟเวอร์ (อาจติด Anti-Bot ของ Lazada) แต่มึงยังสามารถใช้ระบบเจนแคปชั่นได้ปกติครับ")
     else:
         st.error("กรุณาวางลิงก์สินค้าก่อนมึง")
 
@@ -204,41 +190,20 @@ if st.button("✍️ สร้างแคปชั่นป้ายยา", ty
 
 if "final_caption" in st.session_state:
     st.subheader("📝 แคปชั่นของคุณ:")
-    st.text_area("ก๊อปปี้ข้อความด้านล่างนี้ไปโพสต์ได้เลยมึง:", value=st.session_state["final_caption"], height=220)
+    st.text_area("ก๊อปปี้ข้อความไปโพสต์ได้เลย:", value=st.session_state["final_caption"], height=200)
 
-    if st.button("💾 บันทึกงานลงเครื่อง (เซฟแคปชั่น + รูป + คลิป)", use_container_width=True):
-        with st.spinner("กำลังดาวน์โหลดรูปภาพและคลิปวิดีโอลงคอม..."):
-            stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
-            folder = os.path.join(SAVE_ROOT, f"{stamp}_{safe_name(product_name)}")
-            os.makedirs(folder, exist_ok=True)
+# แสดงรูปภาพให้กดเซฟลงมือถือ
+imgs = st.session_state.get("fetched_imgs", [])
+if imgs:
+    st.subheader("🖼️ รูปภาพสินค้า (กดค้างที่รูปเพื่อบันทึกลงมือถือ):")
+    cols = st.columns(3)
+    for idx, img_url in enumerate(imgs):
+        with cols[idx % 3]:
+            st.image(img_url, use_column_width=True)
 
-            # บันทึกแคปชั่น
-            with open(os.path.join(folder, "caption.txt"), "w", encoding="utf-8") as f:
-                f.write(st.session_state["final_caption"])
-
-            # ดาวน์โหลดรูป
-            imgs = st.session_state.get("fetched_imgs", [])
-            ok_img = 0
-            for i, url in enumerate(imgs, 1):
-                try:
-                    ext = os.path.splitext(url.split("?")[0])[1] or ".jpg"
-                    download_file(url, os.path.join(folder, f"image_{i}{ext}"))
-                    ok_img += 1
-                except Exception:
-                    pass
-
-            # ดาวน์โหลดคลิป
-            vids = st.session_state.get("fetched_vids", [])
-            ok_vid = 0
-            for i, url in enumerate(vids, 1):
-                try:
-                    download_file(url, os.path.join(folder, f"video_{i}.mp4"))
-                    ok_vid += 1
-                except Exception:
-                    pass
-
-            st.success(f"บันทึกงานสำเร็จ! ✅ โหลดรูปได้ {ok_img} รูป / คลิป {ok_vid} ไฟล์\nโฟลเดอร์: {folder}")
-            try:
-                open_folder(folder)
-            except Exception:
-                pass
+# แสดงคลิปวิดีโอ
+vids = st.session_state.get("fetched_vids", [])
+if vids:
+    st.subheader("🎬 คลิปวิดีโอสินค้า:")
+    for v_url in vids:
+        st.video(v_url)
