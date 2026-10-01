@@ -1,0 +1,244 @@
+import streamlit as st
+import urllib.request
+import re
+import os
+import sys
+import json
+import random
+import datetime
+import subprocess
+
+# ---------------------------------------------------------------
+# ตั้งค่าพาธบันทึกไฟล์ & HEADERS
+# ---------------------------------------------------------------
+SAVE_ROOT = os.path.join(os.path.expanduser("~"), "Documents", "Lazada_Posts")
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept-Language": "th-TH,th;q=0.9,en;q=0.8",
+}
+
+CAPTION_STYLES = {
+    "🔥 ป้ายยาจัดเต็ม (ภาษาเพื่อนกัน)": (
+        "กระแสแรงจนต้องกดมาลอง! {name} 🔥\n\n"
+        "บอกตรงๆ เล็งอยู่นานมากกก พอได้ลองแล้วโคตรประทับใจ คือทำออกมาได้ดีเกินเรื่องมากว่ะมึง "
+        "{point_embedded}"
+        "ใครงบประมาณนี้แล้วกำลังลังเลอยู่ บอกเลยว่าจัดเหอะ ไม่ต้องคิดเยอะ คุ้มค่าตัวทุกบาทแน่นอน!\n\n"
+        "{price_str}"
+    ),
+    "📝 สายรีวิวใช้งานจริง": (
+        "แกะกล่องลองของ! {name} ✨\n\n"
+        "ใครที่กำลังตามหาตัวนี้อยู่ ฟังทางนี้ก่อนมึง! จากที่ลองใช้งานจริงคือยกให้เป็นตัวเด็ดเลย "
+        "{point_embedded}"
+        "เนื้องานดี คุ้มราคา ไม่จกตาแน่นอน ให้ 10/10 แบบไม่หักเลยมึง ควรมีติดบ้านไว้จริงๆ!\n\n"
+        "{price_str}"
+    ),
+    "⚡ สายป้ายยาของมันต้องมี": (
+        "🚨 ของมันต้องมีว่ะมึง! {name} 🛒✨\n\n"
+        "ไปเจอตัวนี้มา บอกเลยว่าไม่ป้ายยาต่อไม่ได้จริงๆ! "
+        "{point_embedded}"
+        "ใครกำลังเล็งๆ ไว้อยู่ รีบกดใส่ตะกร้าด่วนๆ ก่อนโค้ดหมดหรือของจะขาดตลาดนะมึง คุ้มจัด!\n\n"
+        "{price_str}"
+    ),
+    "💡 สั้นกระชับ ติดเทรนด์": (
+        "ตัวนี้โคตรเด็ดว่ะมึง! {name} 👍\n\n"
+        "{point_embedded}"
+        "ของมันต้องมีจริงๆ คุ้มค่าตัวสุดๆ จิ้มพิกัดด้านล่างแล้วไปตำกันเลยมึง 👇\n\n"
+        "{price_str}"
+    )
+}
+
+HASHTAG_GROUPS = [
+    "#Lazada #LazadaAffiliate #ของดีบอกต่อ #ป้ายยา #พิกัดช้อป #รีวิวของดี #ของมันต้องมี",
+    "#LazadaTH #โปรเด็ด #ใช้ดีบอกต่อ #ป้ายยาลาซาด้า #ของดีราคาถูก #รีวิวแน่น",
+    "#Lazadaส่งฟรี #ช้อปปิ้งออนไลน์ #ของอร่อยบอกต่อ #ป้ายยาวันนี้"
+]
+
+# ---------------------------------------------------------------
+# ฟังก์ชันช่วย (Scraper & Download Engine)
+# ---------------------------------------------------------------
+def clean_title(text):
+    if not text or text.startswith("http://") or text.startswith("https://"):
+        return ""
+    text = re.sub(r'https?://\S+', '', text)
+    return text.strip()
+
+def unique_keep_order(items):
+    seen = set()
+    result = []
+    for x in items:
+        if x and x not in seen:
+            seen.add(x)
+            result.append(x)
+    return result
+
+def extract_lazada_media(url):
+    images, videos, title = [], [], ""
+    try:
+        req = urllib.request.Request(url, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            page = resp.read().decode('utf-8', errors='replace')
+        
+        json_match = re.search(r'window\.__moduleData__\s*=\s*(\{.*?\});', page, re.S)
+        if json_match:
+            try:
+                data = json.loads(json_match.group(1))
+                fields = data.get("data", {}).get("root", {}).get("fields", {})
+                title = clean_title(fields.get("productTitle", ""))
+                sku_galleries = fields.get("skuGalleries", {})
+                for key in sku_galleries:
+                    for img_item in sku_galleries[key]:
+                        if "src" in img_item:
+                            src = img_item["src"]
+                            if not src.startswith("http"):
+                                src = "https:" + src
+                            images.append(src)
+            except Exception:
+                pass
+
+        if not title:
+            title_match = re.search(r'<title>(.*?)</title>', page, re.I | re.S)
+            if title_match:
+                raw_title = title_match.group(1).split('|')[0].split('-')[0].strip()
+                title = clean_title(raw_title)
+
+        if not images:
+            raw_imgs = re.findall(r'https?://[^"\'\s\\<>]+?\.(?:jpg|jpeg|png)', page, re.I)
+            for u in raw_imgs:
+                if ("slatic.net/p/" in u or "lazcdn.com/g/p/" in u) and "template" not in u:
+                    full_img = re.sub(r'_\d+x\d+\.(jpg|png|jpeg)', '', u)
+                    images.append(full_img)
+
+        raw_vids = re.findall(r'https?://[^"\'\s\\<>]+?\.mp4[^"\'\s\\<>]*', page, re.I)
+        videos = [v.replace("\\/", "/") for v in raw_vids]
+
+    except Exception:
+        pass
+    return unique_keep_order(images)[:9], unique_keep_order(videos)[:3], title
+
+def download_file(url, path):
+    req = urllib.request.Request(url, headers=HEADERS)
+    with urllib.request.urlopen(req, timeout=60) as resp, open(path, "wb") as f:
+        while True:
+            chunk = resp.read(256 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+
+def safe_name(text):
+    text = re.sub(r'[\\/:*?"<>|\r\n]', "", text).strip()
+    return text[:40] or "product"
+
+def open_folder(path):
+    if sys.platform.startswith("win"):
+        os.startfile(path)
+    elif sys.platform == "darwin":
+        subprocess.call(["open", path])
+    else:
+        subprocess.call(["xdg-open", path])
+
+def build_caption(style, name, point, price, aff_link, link_header):
+    template = CAPTION_STYLES.get(style, CAPTION_STYLES["🔥 ป้ายยาจัดเต็ม (ภาษาเพื่อนกัน)"])
+    display_name = name if name and not name.startswith("http") else "สินค้าตัวนี้"
+    point_embedded = f"จุดเด่นคือ {point} บอกเลยว่าโคตรเพลิน! " if point else ""
+    price_str = f"💰 ค่าตัวน้องตอนนี้อัปเดตที่: {price} บาทเท่านั้นมึง" if price else ""
+    
+    body = template.format(name=display_name, point_embedded=point_embedded, price_str=price_str)
+    header_text = link_header if link_header else "📌 พิกัดสั่งซื้อราคาพิเศษ (Lazada):"
+    
+    lines = [
+        body.strip(),
+        "",
+        header_text,
+        f"👉 {aff_link}",
+        "",
+        random.choice(HASHTAG_GROUPS)
+    ]
+    return "\n".join(lines)
+
+# ---------------------------------------------------------------
+# หน้าจอโปรแกรม (Streamlit Web UI)
+# ---------------------------------------------------------------
+st.set_page_config(page_title="LAZ HELPER v3.0", page_icon="⚡", layout="centered")
+
+st.title("⚡ LAZ HELPER v3.0")
+st.caption("ตัวช่วยทำโพสต์ Affiliate แบบครบวงจร (สร้างแคปชั่น + ดึงรูป/คลิป)")
+
+aff_link = st.text_input("1. ลิงก์ Affiliate ของคุณ (ลิงก์สั้น):", placeholder="https://s.lazada.co.th/s.xxx")
+prod_link = st.text_input("2. ลิงก์สินค้าธรรมดา (ไว้ดึงรูป/คลิป/ชื่อ):", placeholder="https://www.lazada.co.th/products/...")
+
+if st.button("🔍 ดึงข้อมูลสินค้าออโต้"):
+    if prod_link:
+        with st.spinner("กำลังดึงข้อมูลรูปภาพ วิดีโอ และชื่อสินค้า..."):
+            imgs, vids, extracted_title = extract_lazada_media(prod_link)
+            st.session_state["fetched_imgs"] = imgs
+            st.session_state["fetched_vids"] = vids
+            if extracted_title:
+                st.session_state["product_name"] = extracted_title
+            
+            st.success(f"ดึงข้อมูลสำเร็จ! พบรูปภาพ {len(imgs)} รูป / คลิปวิดีโอ {len(vids)} ไฟล์")
+    else:
+        st.error("กรุณาวางลิงก์สินค้าก่อนมึง")
+
+default_name = st.session_state.get("product_name", "")
+product_name = st.text_input("ชื่อสินค้า (พิมพ์เปลี่ยนตรงนี้ได้):", value=default_name)
+
+col1, col2 = st.columns(2)
+with col1:
+    product_point = st.text_input("จุดเด่นสินค้า:", placeholder="เช่น หอมอร่อยเคี้ยวกรุบๆ")
+with col2:
+    product_price = st.text_input("ราคา (บาท):", placeholder="เช่น 199 หรือ 1,300")
+
+link_header = st.text_input("ข้อความหัวข้อพิกัด:", value="📌 พิกัดสั่งซื้อราคาพิเศษ (Lazada):")
+selected_style = st.selectbox("เลือกสไตล์แคปชั่น:", list(CAPTION_STYLES.keys()))
+
+if st.button("✍️ สร้างแคปชั่นป้ายยา", type="primary", use_container_width=True):
+    if not aff_link:
+        st.error("ใส่ลิงก์ Affiliate ในช่องแรกก่อนนะมึง!")
+    else:
+        caption_result = build_caption(selected_style, product_name, product_point, product_price, aff_link, link_header)
+        st.session_state["final_caption"] = caption_result
+
+if "final_caption" in st.session_state:
+    st.subheader("📝 แคปชั่นของคุณ:")
+    st.text_area("ก๊อปปี้ข้อความด้านล่างนี้ไปโพสต์ได้เลยมึง:", value=st.session_state["final_caption"], height=220)
+
+    if st.button("💾 บันทึกงานลงเครื่อง (เซฟแคปชั่น + รูป + คลิป)", use_container_width=True):
+        with st.spinner("กำลังดาวน์โหลดรูปภาพและคลิปวิดีโอลงคอม..."):
+            stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M")
+            folder = os.path.join(SAVE_ROOT, f"{stamp}_{safe_name(product_name)}")
+            os.makedirs(folder, exist_ok=True)
+
+            # บันทึกแคปชั่น
+            with open(os.path.join(folder, "caption.txt"), "w", encoding="utf-8") as f:
+                f.write(st.session_state["final_caption"])
+
+            # ดาวน์โหลดรูป
+            imgs = st.session_state.get("fetched_imgs", [])
+            ok_img = 0
+            for i, url in enumerate(imgs, 1):
+                try:
+                    ext = os.path.splitext(url.split("?")[0])[1] or ".jpg"
+                    download_file(url, os.path.join(folder, f"image_{i}{ext}"))
+                    ok_img += 1
+                except Exception:
+                    pass
+
+            # ดาวน์โหลดคลิป
+            vids = st.session_state.get("fetched_vids", [])
+            ok_vid = 0
+            for i, url in enumerate(vids, 1):
+                try:
+                    download_file(url, os.path.join(folder, f"video_{i}.mp4"))
+                    ok_vid += 1
+                except Exception:
+                    pass
+
+            st.success(f"บันทึกงานสำเร็จ! ✅ โหลดรูปได้ {ok_img} รูป / คลิป {ok_vid} ไฟล์\nโฟลเดอร์: {folder}")
+            try:
+                open_folder(folder)
+            except Exception:
+                pass
