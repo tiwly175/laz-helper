@@ -12,7 +12,7 @@ PROFANITY = [
     ("เหี้ย", "ม", False), ("ห่า", "งวน", True), ("ควย", "", False), ("สัส", "ดี", False),
     ("เชี่ย", "วน", False), ("แม่ง", "า", False), ("ฉิบหาย", "", False), ("ชิบหาย", "", False),
     ("ระยำ", "", False), ("ตอแหล", "", False), ("ส้นตีน", "", False), ("เย็ด", "", False),
-    ("หี", "บ", True), ("มึง", "", True), ("กู", "รลเ", True), ("โคตร", "เวต", False),
+    ("หี", "บ", True), ("มึง", "", False), ("กู", "รลเ", True), ("โคตร", "เวต", False),
 ]
 
 
@@ -302,26 +302,32 @@ TONES = {
 
 BASE_TAGS = ["#Lazada", "#LazadaTH", "#LazadaAffiliate", "#ป้ายยา", "#ของดีบอกต่อ", "#พิกัดช้อป"]
 DISCLOSURE_TAGS = "#โฆษณา #Affiliate"
+BIO_LINK_LINE = "👉 ลิงก์สั่งซื้ออยู่ที่ไบโอ (หรือคอมเมนต์แรก)"
 
 
 def build_caption(tone, cat_key, name, point, price, promo, aff_link, link_header,
-                  experienced=False, disclose=True, rng=random):
+                  experienced=False, disclose=True, rng=random, body_override=None,
+                  signature="", max_tags=None, link_mode="inline"):
     tone_cfg = TONES.get(tone) or next(iter(TONES.values()))
     cat = CATEGORIES.get(cat_key) or CATEGORIES["general"]
 
     display_name = short_name(name) or "สินค้าตัวนี้"
     price = fmt_price(price)
-    parts = [rng.choice(tone_cfg["hooks"]).format(name=display_name, e=cat["emoji"])]
-
-    body = []
-    if point:
-        body.append(f"จุดเด่นคือ {point}")
-    if tone_cfg["full"]:
-        body.append(rng.choice(cat["lines"]))
-        if experienced:
-            body.append(cat["exp"])
-    if body:
-        parts.append("\n".join(body))
+    if body_override:
+        # ข้อความจาก AI: ตัดลิงก์/แฮชแท็กที่ AI อาจแถมมา เพื่อไม่ให้แตะลิงก์ Affiliate
+        ai_text = re.sub(r"https?://\S+|#\S+", "", body_override).strip()
+        parts = [ai_text or display_name]
+    else:
+        parts = [rng.choice(tone_cfg["hooks"]).format(name=display_name, e=cat["emoji"])]
+        body = []
+        if point:
+            body.append(f"จุดเด่นคือ {point}")
+        if tone_cfg["full"]:
+            body.append(rng.choice(cat["lines"]))
+            if experienced:
+                body.append(cat["exp"])
+        if body:
+            parts.append("\n".join(body))
     if cat["note"]:
         parts.append(f"ℹ️ {cat['note']}")
 
@@ -334,11 +340,19 @@ def build_caption(tone, cat_key, name, point, price, promo, aff_link, link_heade
         parts.append("\n".join(extras))
 
     parts.append(rng.choice(tone_cfg["ctas"]))
-    parts.append(f"{link_header or '📌 พิกัดสั่งซื้อ (Lazada):'}\n👉 {aff_link}")
+    if link_mode == "bio":
+        parts.append(BIO_LINK_LINE)  # แพลตฟอร์มที่ลิงก์ในแคปชั่นกดไม่ได้ (เช่น Instagram)
+    else:
+        parts.append(f"{link_header or '📌 พิกัดสั่งซื้อ (Lazada):'}\n👉 {aff_link}")
+    if signature and signature.strip():
+        parts.append(signature.strip())
 
-    tags = rng.sample(BASE_TAGS, 2) + rng.sample(cat["tags"], min(3, len(cat["tags"])))
-    tag_line = " ".join(tags)
-    parts.append(f"{DISCLOSURE_TAGS} {tag_line}" if disclose else tag_line)
+    tag_list = (["#โฆษณา", "#Affiliate"] if disclose else []) \
+        + rng.sample(BASE_TAGS, 2) + rng.sample(cat["tags"], min(3, len(cat["tags"])))
+    if max_tags is not None:
+        tag_list = tag_list[:max_tags]  # แท็กโฆษณาอยู่หน้าสุดเสมอ จึงไม่ถูกตัดก่อน
+    if tag_list:
+        parts.append(" ".join(tag_list))
 
     text = "\n\n".join(parts)
     text, _ = clean_profanity(text)  # ด่านสุดท้ายกันคำไม่สุภาพหลุด
@@ -352,37 +366,138 @@ LAZADA_LINK_RE = re.compile(r"^https?://([a-z0-9-]+\.)*(lazada\.[a-z.]+|lzd\.co)
 BAD_NAMES = ("lazada", "lazada.co.th", "captcha", "access denied", "just a moment", "404", "error")
 
 
+CAT_LABEL_EN = {
+    "food": "🍜 Food / snacks / drinks",
+    "beauty": "💄 Beauty / skincare",
+    "supplement": "💊 Supplements / vitamins",
+    "fashion": "👗 Fashion / apparel",
+    "electronics": "🎧 Electronics / gadgets",
+    "home": "🏠 Home / appliances",
+    "baby_pet": "🍼 Baby / pets",
+    "auto_tools": "🔧 Auto / tools",
+    "general": "🛍️ General",
+}
+TONE_LABEL_EN = {
+    "😊 เป็นกันเอง": "😊 Friendly",
+    "📝 สรุปข้อมูลสินค้า": "📝 Product summary",
+    "⚡ ป้ายยาสายด่วน": "⚡ Hype",
+    "💡 สั้นกระชับ": "💡 Short & snappy",
+}
+
+
+def cat_label(key, lang="th"):
+    if lang == "en":
+        return CAT_LABEL_EN.get(key, key)
+    return CATEGORIES.get(key, CATEGORIES["general"])["label"]
+
+
+def tone_label(key, lang="th"):
+    return TONE_LABEL_EN.get(key, key) if lang == "en" else key
+
+
 def validate_inputs(aff_link, prod_link, name, price_raw, point, cat_key, chosen_auto):
-    """คืนลิสต์ (ระดับ, ข้อความ) ระดับ = error / warning / info"""
+    """คืนลิสต์ (ระดับ, รหัสข้อความ, พารามิเตอร์) ให้แอปแปลภาษาเอง
+    ระดับ = error / warning / info
+    """
     out = []
     aff = (aff_link or "").strip()
     if not aff:
-        out.append(("error", "ยังไม่ได้ใส่ลิงก์ Affiliate"))
+        out.append(("error", "v_no_aff", {}))
     elif "xxx" in aff.lower():
-        out.append(("error", "ลิงก์ Affiliate ยังเป็นตัวอย่าง (มี xxx) ใส่ลิงก์จริงของคุณ"))
+        out.append(("error", "v_aff_placeholder", {}))
     elif not LAZADA_LINK_RE.match(aff):
-        out.append(("warning", "ลิงก์ Affiliate ดูไม่เหมือนลิงก์ของ Lazada โปรดเช็กอีกครั้ง"))
-    if aff and prod_link and aff.strip() == prod_link.strip():
-        out.append(("warning", "ลิงก์ Affiliate กับลิงก์สินค้าเป็นลิงก์เดียวกัน (อาจไม่ใช่ลิงก์ที่มีรหัสคอมมิชชั่น)"))
+        out.append(("warning", "v_aff_not_lazada", {}))
+    if aff and prod_link and aff == prod_link.strip():
+        out.append(("warning", "v_same_link", {}))
 
     n = (name or "").strip()
     if not n:
-        out.append(("warning", "ยังไม่มีชื่อสินค้า แคปชั่นจะใช้คำว่า \"สินค้าตัวนี้\""))
+        out.append(("warning", "v_no_name", {}))
     elif n.lower() in BAD_NAMES:
-        out.append(("warning", f"ชื่อสินค้า \"{n}\" น่าจะดึงมาผิด ลองพิมพ์ชื่อเองหรือดึงใหม่"))
+        out.append(("warning", "v_bad_name", {"name": n}))
     elif len(n) > 120:
-        out.append(("info", "ชื่อสินค้ายาวมาก ระบบย่อให้ในแคปชั่นแล้ว"))
+        out.append(("info", "v_long_name", {}))
 
     if not (price_raw or "").strip():
-        out.append(("info", "ไม่ได้ใส่ราคา แคปชั่นจะไม่แสดงราคา"))
+        out.append(("info", "v_no_price", {}))
     elif not fmt_price(price_raw):
-        out.append(("warning", f"ราคา \"{price_raw}\" ไม่ใช่ตัวเลข จึงไม่แสดงในแคปชั่น"))
+        out.append(("warning", "v_bad_price", {"price": price_raw}))
 
     if not (point or "").strip():
-        out.append(("info", "ไม่ได้ใส่จุดเด่น ลองใส่ 1 ข้อ แคปชั่นจะดูเฉพาะเจาะจงขึ้น"))
+        out.append(("info", "v_no_point", {}))
 
     if cat_key == "general":
-        out.append(("info", "ตรวจไม่พบหมวดสินค้า ใช้ข้อความทั่วไป (เลือกหมวดเองได้)"))
+        out.append(("info", "v_cat_general", {}))
     elif chosen_auto:
-        out.append(("info", f"ตรวจพบหมวด: {CATEGORIES[cat_key]['label']} (ถ้าไม่ถูก เลือกหมวดเองได้)"))
+        out.append(("info", "v_cat_detected", {"cat": cat_key}))
     return out
+
+
+# ---------------------------------------------------------------
+# ตรวจคำเสี่ยงโฆษณาเกินจริง (อิงคำเตือนของ สคบ. เรื่องอวดยอดขาย/โฆษณาเกินจริง)
+# ---------------------------------------------------------------
+RISKY = {
+    "medical": [
+        "รักษา", "หายขาด", "หายเร็ว", "ป้องกันโรค", "ผอมเร็ว", "ขาวไว", "ขาวใน",
+        "ไม่มีผลข้างเคียง", "ลดความอ้วน", "ลดน้ำหนักได้",
+    ],
+    "absolute": [
+        "ดีที่สุด", "ถูกที่สุด", "อันดับ 1", "อันดับ1", "อันดับหนึ่ง", "100%", "การันตี",
+        "รับประกันผล", "เห็นผลทันที", "ไม่มีใครเหมือน", "no.1", "no 1",
+    ],
+    "sales": [
+        "ขายดี", "ถล่มทลาย", "ของหมด", "สินค้าหมด", "ขายหมด", "เหลือน้อย", "ยอดขายล้าน",
+        "ล้านชิ้น", "หมดแล้ว",
+    ],
+}
+
+
+def find_risky(text):
+    """คืน dict หมวด -> รายการคำที่พบ (ไม่ซ้ำ)"""
+    low = (text or "").lower()
+    found = {}
+    for cat, terms in RISKY.items():
+        hits = [t for t in terms if t in low]
+        if hits:
+            found[cat] = hits
+    return found
+
+
+def risky_checks(text):
+    """คืนลิสต์ (ระดับ, รหัสข้อความ, พารามิเตอร์) รูปแบบเดียวกับ validate_inputs"""
+    return [("warning", f"v_risky_{cat}", {"terms": ", ".join(hits)})
+            for cat, hits in find_risky(text).items()]
+
+
+# ---------------------------------------------------------------
+# พรีเซ็ตแพลตฟอร์ม (ตัวเลขจากแหล่งที่ค้นเมื่อ ต.ค. 2026 ตรวจซ้ำก่อนใช้จริงได้)
+# ---------------------------------------------------------------
+PLATFORMS = {
+    "general": {"limit": None, "max_tags": None, "link_mode": "inline"},
+    "facebook": {"limit": None, "max_tags": None, "link_mode": "inline"},
+    "instagram": {"limit": 2200, "max_tags": 5, "link_mode": "bio"},
+    "tiktok": {"limit": 2200, "max_tags": 5, "link_mode": "inline"},
+    "x": {"limit": 280, "max_tags": 3, "link_mode": "inline"},
+}
+URL_IN_TEXT = re.compile(r"https?://\S+")
+X_URL_WEIGHT = 23  # X นับลิงก์เป็น 23 ตัวอักษรเสมอ
+
+
+def platform_opts(platform):
+    p = PLATFORMS.get(platform) or PLATFORMS["general"]
+    return {"max_tags": p["max_tags"], "link_mode": p["link_mode"]}
+
+
+def platform_report(caption, platform):
+    """นับตัวอักษร/แฮชแท็ก เทียบเพดานของแพลตฟอร์ม (ตัวเลขประมาณการ)"""
+    p = PLATFORMS.get(platform) or PLATFORMS["general"]
+    text = caption or ""
+    counted = URL_IN_TEXT.sub("x" * X_URL_WEIGHT, text) if platform == "x" else text
+    chars = len(counted)
+    limit = p["limit"]
+    return {
+        "chars": chars,
+        "limit": limit,
+        "tags": len(re.findall(r"#\S+", text)),
+        "over": bool(limit and chars > limit),
+    }
