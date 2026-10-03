@@ -1,12 +1,14 @@
 """โหมดหลายสินค้า: แยกบรรทัดลิงก์ + ประมวลผลทีละรายการ (ฟังก์ชันจริงฉีดจากแอป เทสต์แยกได้)"""
 import re
 
+import stores
+
 URL_RE = re.compile(r"https?://[^\s|<>\"'）)]+")
-PROD_RE = re.compile(r"/products/|/pdp/|-i\d+(?:-s\d+)?\.html", re.I)
+PROD_RE = re.compile(r"/products/|/pdp/|-i\d+(?:-s\d+)?\.html|/product/\d+/\d+|/opaanlp/\d+/\d+|-i\.\d+\.\d+", re.I)
 
 
 def _is_product(url):
-    return bool(PROD_RE.search(url))
+    return (not stores.is_aff_host(url)) and bool(PROD_RE.search(url))
 
 
 def parse_batch(text, max_items):
@@ -39,12 +41,14 @@ def parse_batch(text, max_items):
 
 
 def process_item(item, fetch_fn, build_fn, validate_fn):
-    """fetch_fn(prod)->info, build_fn(name, price, aff)->(caption, cat_key),
-    validate_fn(aff, prod, name, price, cat_key)->checks"""
-    info = fetch_fn(item["prod"]) or {}
+    """item มี store (ร้านของรายการนี้)
+    fetch_fn(prod, store)->info, build_fn(name, price, aff, store)->(caption, cat_key),
+    validate_fn(aff, prod, name, price, cat_key, store)->checks"""
+    store = item.get("store", "lazada")
+    info = fetch_fn(item["prod"], store) or {}
     name = info.get("title", "")
     price = info.get("price", "")
-    caption, cat_key = build_fn(name, price, item["aff"])
+    caption, cat_key = build_fn(name, price, item["aff"], store)
     return {
         "line": item["line"],
         "name": name,
@@ -53,5 +57,6 @@ def process_item(item, fetch_fn, build_fn, validate_fn):
         "images": len(info.get("images", [])),
         "fetch_error": info.get("error", ""),
         "http": info.get("http", ""),
-        "checks": validate_fn(item["aff"], item["prod"], name, price, cat_key),
+        "store": store,
+        "checks": validate_fn(item["aff"], item["prod"], name, price, cat_key, store),
     }

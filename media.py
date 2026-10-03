@@ -30,8 +30,8 @@ IMG_EXT = ("jpg", "jpeg", "png", "webp")
 VID_EXT = ("mp4", "m3u8", "mov", "webm")
 JUNK_WORDS = ("logo", "icon", "sprite", "badge", "placeholder", "blank", "template",
               "avatar", "emoji", "loading", "banner", "flag")
-MAX_IMAGES = 12
-MAX_VIDEOS = 3
+MAX_IMAGES = 30
+MAX_VIDEOS = 8
 
 
 class FetchError(Exception):
@@ -343,8 +343,9 @@ def _unique(items):
     return out
 
 
-def fetch_product(url_or_text):
-    """จุดเข้าหลัก คืน dict พร้อม error code ('' ถ้าสำเร็จ)"""
+def fetch_product(url_or_text, fetcher=None):
+    """จุดเข้าหลัก คืน dict พร้อม error code ('' ถ้าสำเร็จ)
+    fetcher: ฟังก์ชันดึงหน้าเว็บ (ค่าเริ่มต้น = ของ Lazada)"""
     info = {"title": "", "price": "", "images": [], "videos": [], "error": "", "http": "", "url": ""}
     url = extract_first_url(url_or_text)
     info["url"] = url
@@ -352,7 +353,7 @@ def fetch_product(url_or_text):
         info["error"] = "empty"
         return info
     try:
-        page, final, err = fetch_page(url)
+        page, final, err = (fetcher or fetch_page)(url)
     except FetchError as e:
         info["error"] = e.code
         return info
@@ -365,6 +366,59 @@ def fetch_product(url_or_text):
         if not info["title"] and not info["images"] and not info["error"]:
             info["error"] = "nodata"
     return info
+
+
+# ---------------------------------------------------------------
+# เว็บทั่วไป (ไม่ใช่ Lazada): อ่าน og:/JSON-LD แบบเบาๆ มีเพดานขนาดหน้า
+# ---------------------------------------------------------------
+def _generic_headers(ua):
+    return {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "th-TH,th;q=0.9,en;q=0.8",
+    }
+
+
+def fetch_page_generic(url, max_bytes=3_000_000):
+    """คืน (html, final_url, error_code) บล็อก IP ภายใน อ่านไม่เกิน max_bytes"""
+    last = ("", url, "empty")
+    for ua in (UA_MOBILE, UA_DESKTOP):
+        try:
+            r = safe_get(url, _generic_headers(ua), stream=True)
+        except FetchError as e:
+            if e.code == "unsafe":
+                raise
+            last = ("", url, e.code)
+            continue
+        try:
+            final = getattr(r, "final_url", url)
+            if r.status_code != 200:
+                last = ("", final, f"http_{r.status_code}")
+                continue
+            ctype = (r.headers.get("Content-Type") or "").lower()
+            if ctype and "html" not in ctype and "xml" not in ctype:
+                last = ("", final, "empty")
+                continue
+            buf = bytearray()
+            for chunk in r.iter_content(64 * 1024):
+                buf.extend(chunk)
+                if len(buf) >= max_bytes:
+                    break
+            text = bytes(buf).decode(r.encoding or "utf-8", errors="replace")
+        finally:
+            r.close()
+        if _is_captcha(text):
+            last = (text, final, "captcha")
+            continue
+        if len(text) < 300:
+            last = (text, final, "empty")
+            continue
+        return text, final, ""
+    return last
+
+
+def fetch_product_generic(url_or_text):
+    return fetch_product(url_or_text, fetcher=fetch_page_generic)
 
 
 # ---------------------------------------------------------------

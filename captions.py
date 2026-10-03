@@ -4,6 +4,8 @@
 import random
 import re
 
+import stores
+
 # ---------------------------------------------------------------
 # กรองคำไม่สุภาพ
 # ---------------------------------------------------------------
@@ -300,14 +302,14 @@ TONES = {
     },
 }
 
-BASE_TAGS = ["#Lazada", "#LazadaTH", "#LazadaAffiliate", "#ป้ายยา", "#ของดีบอกต่อ", "#พิกัดช้อป"]
+SHARED_TAGS = ["#ป้ายยา", "#ของดีบอกต่อ", "#พิกัดช้อป", "#ช้อปออนไลน์"]
 DISCLOSURE_TAGS = "#โฆษณา #Affiliate"
 BIO_LINK_LINE = "👉 ลิงก์สั่งซื้ออยู่ที่ไบโอ (หรือคอมเมนต์แรก)"
 
 
 def build_caption(tone, cat_key, name, point, price, promo, aff_link, link_header,
                   experienced=False, disclose=True, rng=random, body_override=None,
-                  signature="", max_tags=None, link_mode="inline"):
+                  signature="", max_tags=None, link_mode="inline", store="lazada"):
     tone_cfg = TONES.get(tone) or next(iter(TONES.values()))
     cat = CATEGORIES.get(cat_key) or CATEGORIES["general"]
 
@@ -343,12 +345,15 @@ def build_caption(tone, cat_key, name, point, price, promo, aff_link, link_heade
     if link_mode == "bio":
         parts.append(BIO_LINK_LINE)  # แพลตฟอร์มที่ลิงก์ในแคปชั่นกดไม่ได้ (เช่น Instagram)
     else:
-        parts.append(f"{link_header or '📌 พิกัดสั่งซื้อ (Lazada):'}\n👉 {aff_link}")
+        parts.append(f"{link_header or '📌 พิกัดสั่งซื้อ:'}\n👉 {aff_link}")
     if signature and signature.strip():
         parts.append(signature.strip())
 
+    own = stores.store_tags(store)
+    base = rng.sample(own, 1) if own else []
+    base += rng.sample(SHARED_TAGS, 2 - len(base))  # แท็กร้าน 1 + แท็กกลาง 1 (ไม่มีแท็กร้านก็ใช้แท็กกลาง 2)
     tag_list = (["#โฆษณา", "#Affiliate"] if disclose else []) \
-        + rng.sample(BASE_TAGS, 2) + rng.sample(cat["tags"], min(3, len(cat["tags"])))
+        + base + rng.sample(cat["tags"], min(3, len(cat["tags"])))
     if max_tags is not None:
         tag_list = tag_list[:max_tags]  # แท็กโฆษณาอยู่หน้าสุดเสมอ จึงไม่ถูกตัดก่อน
     if tag_list:
@@ -395,7 +400,7 @@ def tone_label(key, lang="th"):
     return TONE_LABEL_EN.get(key, key) if lang == "en" else key
 
 
-def validate_inputs(aff_link, prod_link, name, price_raw, point, cat_key, chosen_auto):
+def validate_inputs(aff_link, prod_link, name, price_raw, point, cat_key, chosen_auto, store="lazada"):
     """คืนลิสต์ (ระดับ, รหัสข้อความ, พารามิเตอร์) ให้แอปแปลภาษาเอง
     ระดับ = error / warning / info
     """
@@ -405,8 +410,8 @@ def validate_inputs(aff_link, prod_link, name, price_raw, point, cat_key, chosen
         out.append(("error", "v_no_aff", {}))
     elif "xxx" in aff.lower():
         out.append(("error", "v_aff_placeholder", {}))
-    elif not LAZADA_LINK_RE.match(aff):
-        out.append(("warning", "v_aff_not_lazada", {}))
+    elif not stores.link_matches(store, aff):
+        out.append(("warning", "v_aff_wrong_store", {"store": store}))
     if aff and prod_link and aff == prod_link.strip():
         out.append(("warning", "v_same_link", {}))
 

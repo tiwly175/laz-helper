@@ -1,4 +1,6 @@
+import hashlib
 import io
+import json
 import zipfile
 from datetime import date, datetime
 from html import escape
@@ -12,6 +14,9 @@ import captions as cp
 import guard
 import library
 import media
+import publish
+import shopee_api
+import stores
 from i18n import STR, make_t
 from theme import ACCENTS, build_css
 
@@ -23,6 +28,7 @@ THEMES = ["auto", "light", "dark", "dim", "comfort"]
 ACCENT_IDS = list(ACCENTS.keys())
 SIZES = ["s", "m", "l"]
 PLATFORM_IDS = list(cp.PLATFORMS.keys())
+STORE_CHOICES = [stores.AUTO] + stores.STORE_IDS
 
 
 def secret(name, default=""):
@@ -55,10 +61,11 @@ _init("warm", False, cast=_truthy)
 _init("reduce_motion", False, cast=_truthy)
 _init("text_size", "m", SIZES)
 _init("platform", "general", PLATFORM_IDS)
+_init("store", stores.AUTO, STORE_CHOICES)
 _init("signature", "", cast=lambda v: str(v)[:120])
 
 PREF_KEYS = ("lang", "theme", "accent", "brightness", "warm", "reduce_motion",
-             "text_size", "platform", "signature", "authed")
+             "text_size", "platform", "store", "signature", "authed")
 t = make_t(st.session_state["lang"])
 
 
@@ -86,6 +93,8 @@ def render_checks(checks, levels=None):
         p = dict(params)
         if code == "v_cat_detected":
             p["label"] = cp.cat_label(p.pop("cat"), st.session_state["lang"])
+        if code == "v_aff_wrong_store":
+            p["store"] = t(f"store_{p['store']}")
         notice(level, t(code, **p))
 
 
@@ -98,17 +107,38 @@ class _NotCached(Exception):
         self.info = info
 
 
+def shopee_creds():
+    return {"app_id": str(secret("SHOPEE_APP_ID", "")), "secret": str(secret("SHOPEE_APP_SECRET", "")),
+            "endpoint": str(secret("SHOPEE_API_ENDPOINT", ""))}
+
+
+def fb_creds():
+    return {"page_id": str(secret("FB_PAGE_ID", "")).strip(), "token": str(secret("FB_PAGE_TOKEN", "")).strip(),
+            "version": str(secret("FB_GRAPH_VERSION", "")).strip()}
+
+
+@st.cache_resource
+def _post_limiter():
+    return guard.WindowLimiter(int(secret("POST_DAILY_LIMIT", 10)), 86400)
+
+
+def default_header(store):
+    if store == "generic":
+        return t("header_default_generic")
+    return t("header_default_store", store=t(f"store_{store}"))
+
+
 @st.cache_data(ttl=600, show_spinner=False)
-def _fetch_ok(url_or_text):
-    info = media.fetch_product(url_or_text)
+def _fetch_ok(store, url_or_text, _creds=None):
+    info = stores.fetch_product(store, url_or_text, _creds)
     if info["error"] or not (info["images"] or info["videos"]):
         raise _NotCached(info)  # ล้มเหลว/ได้ไม่ครบ = ไม่แคช กดดึงใหม่แล้วลองจริงทันที
     return info
 
 
-def cached_product(url_or_text):
+def cached_product(store, url_or_text):
     try:
-        return _fetch_ok(url_or_text)
+        return _fetch_ok(store, url_or_text, shopee_creds() if store == "shopee" else None)
     except _NotCached as e:
         return e.info
 
@@ -213,6 +243,7 @@ st.query_params.update({
     "warm": "1" if st.session_state["warm"] else "0",
     "reduce_motion": "1" if st.session_state["reduce_motion"] else "0",
     "text_size": st.session_state["text_size"], "platform": st.session_state["platform"],
+    "store": st.session_state["store"],
     "signature": st.session_state["signature"],
 })
 
@@ -277,9 +308,36 @@ left, right = st.columns([5, 6], gap="large")
 
 with left:
     st.markdown(f"<div class='laz-sec'>{escape(t('sec_inputs'))}</div>", unsafe_allow_html=True)
-    aff_link = st.text_input(t("aff_label"), key="aff_link", placeholder=t("aff_ph"))
-    prod_link = st.text_input(t("prod_label"), key="prod_link", placeholder=t("prod_ph"),
+    store_choice = st.selectbox(t("store_label"), STORE_CHOICES, key="store",
+                                format_func=lambda k: t("store_auto") if k == stores.AUTO else t(f"store_{k}"))
+    probe = st.session_state.get("prod_link") or st.session_state.get("aff_link") or ""
+    eff_store = store_choice if store_choice != stores.AUTO else (stores.detect_store(probe) or "lazada")
+    if store_choice == stores.AUTO:
+        st.caption(t("store_detected", store=t(f"store_{eff_store}")))
+    if eff_store in ("shopee", "generic"):
+        st.caption(t(f"store_note_{eff_store}"))
+    aff_link = st.text_input(t("aff_label"), key="aff_link",
+                             placeholder=t("aff_ph") if eff_store == "lazada" else t("aff_ph_other"))
+    prod_link = st.text_input(t("prod_label"), key="prod_link",
+                              placeholder=t("prod_ph") if eff_store == "lazada" else t("prod_ph_other"),
                               help=t("prod_help"))
+
+    def make_shopee_link():
+        if not fetch_allowed():
+            st.session_state["_aff_gen"] = ("err", t("fetch_limited"))
+            return
+        ok, res = shopee_api.generate_short_link(st.session_state.get("prod_link", ""), shopee_creds())
+        if ok:
+            st.session_state["aff_link"] = res
+            st.session_state["_aff_gen"] = ("ok", "")
+        else:
+            st.session_state["_aff_gen"] = ("err", reason_text(res))
+
+    if eff_store == "shopee":
+        st.button(t("shopee_gen_btn"), on_click=make_shopee_link, use_container_width=True)
+        gen = st.session_state.pop("_aff_gen", None)
+        if gen:
+            notice("success", t("shopee_gen_ok")) if gen[0] == "ok" else notice("error", t("shopee_gen_err", reason=gen[1]))
 
     if st.button(t("fetch_btn"), use_container_width=True):
         if not prod_link.strip():
@@ -288,7 +346,7 @@ with left:
             notice("error", t("fetch_limited"))
         else:
             with st.spinner(t("fetching")):
-                info = cached_product(prod_link.strip())
+                info = cached_product(eff_store, prod_link.strip())
             st.session_state["info"] = info
             st.session_state["zip"] = None
             # สินค้าใหม่ = ล้างของเก่า กันก๊อปข้อความสินค้าก่อนหน้า
@@ -335,7 +393,7 @@ with left:
                         format_func=lambda k: cp.tone_label(k, lang))
     platform = st.selectbox(t("platform_label"), PLATFORM_IDS, key="platform",
                             format_func=lambda k: t(f"pf_{k}"))
-    link_header = st.text_input(t("header_label"), value=t("header_default"), key=f"hdr_{lang}")
+    link_header = st.text_input(t("header_label"), value=default_header(eff_store), key=f"hdr_{lang}_{eff_store}")
     signature = st.text_input(t("signature_label"), key="signature", placeholder=t("signature_ph"),
                               max_chars=120)
     k1, k2 = st.columns(2)
@@ -351,7 +409,7 @@ with left:
         clean_sig, f4 = cp.clean_profanity(signature)
         removed = f1 + f2 + f3 + f4
         checks = cp.validate_inputs(aff_link, prod_link, clean_name, product_price,
-                                    clean_point, cat_key, chosen_auto)
+                                    clean_point, cat_key, chosen_auto, store=eff_store)
         if removed:
             checks.append(("warning", "v_profanity", {"words": ", ".join(sorted(set(removed)))}))
         if any(level == "error" for level, _, _ in checks):
@@ -366,7 +424,7 @@ with left:
                                     clean_promo, aff_link.strip(), link_header,
                                     experienced, disclose, body_override=body,
                                     signature=clean_sig, max_tags=popts["max_tags"],
-                                    link_mode=popts["link_mode"])
+                                    link_mode=popts["link_mode"], store=eff_store)
 
         caps = []
         if use_ai:
@@ -394,7 +452,7 @@ with left:
         st.session_state["checks"] = checks
         st.session_state["caption_meta"] = {
             "name": product_name, "aff": aff_link.strip(), "cat": cat_key,
-            "price": cp.fmt_price(product_price), "platform": platform,
+            "price": cp.fmt_price(product_price), "platform": platform, "store": eff_store,
         }
         hist = st.session_state.setdefault("history", [])
         hist.insert(0, (datetime.now().strftime("%H:%M"), clean_name or "-", caps[0]))
@@ -450,6 +508,7 @@ with right:
             st.markdown(
                 f"<div class='laz-card'><b>{escape(t('summary_name'))}:</b> "
                 f"{escape(cp.short_name(meta['name']) or '-')}<br>"
+                f"<b>{escape(t('summary_store'))}:</b> {escape(t('store_' + meta.get('store', 'lazada')))}<br>"
                 f"<b>{escape(t('summary_cat'))}:</b> {escape(cp.cat_label(meta['cat'], lang))}<br>"
                 f"<b>{escape(t('summary_price'))}:</b> {escape(meta['price'] or '-')}</div>",
                 unsafe_allow_html=True)
@@ -571,11 +630,101 @@ if vids:
                 st.caption(t("video_hls"))
 
 # ---------------------------------------------------------------
+# ส่งต่อ / โพสต์
+# ---------------------------------------------------------------
+st.markdown(f"<div class='laz-sec'>{escape(t('post_sec'))}</div>", unsafe_allow_html=True)
+if not caps:
+    st.caption(t("post_need_caps"))
+else:
+    pick = st.selectbox(t("post_pick"), list(range(len(caps))), format_func=lambda i: t("variant", n=i + 1),
+                        key="post_pick_idx")
+    base_text = caps[min(pick, len(caps) - 1)]
+    post_text = st.text_area(t("post_text"), value=base_text, height=200,
+                             key=f"post_text_{abs(hash(base_text))}")
+
+    st.markdown(f"**{t('share_title')}**")
+    st.caption(t("share_hint"))
+    links = publish.share_links(post_text)
+    b1, b2, b3 = st.columns(3)
+    with b1:
+        if "line" in links:
+            st.link_button(t("share_line"), links["line"], use_container_width=True)
+    with b2:
+        if "x" in links:
+            st.link_button(t("share_x"), links["x"], use_container_width=True)
+    with b3:
+        st.link_button(t("share_fb"), "https://www.facebook.com/", use_container_width=True)
+    if len(links) < 2:
+        st.caption(t("share_too_long"))
+    components.html(
+        "<button id='sh' style=\"width:100%;padding:10px;border-radius:10px;border:1px solid #8884;"
+        "background:transparent;color:inherit;font-size:15px;cursor:pointer\">" + escape(t("share_native")) + "</button>"
+        "<div id='m' style='font:13px sans-serif;color:#888;margin-top:6px'></div>"
+        "<script>const T=" + json.dumps(post_text).replace("</", "<\\/") + ",F=" + json.dumps(t("share_native_fail")).replace("</", "<\\/") + ";"
+        "document.getElementById('sh').onclick=async()=>{try{await navigator.share({text:T});}"
+        "catch(e){if(e&&e.name!=='AbortError')document.getElementById('m').textContent=F;}};</script>",
+        height=80)
+
+    st.markdown(f"**{t('fb_title')}**")
+    fbc = fb_creds()
+    if not publish.creds_ok(fbc):
+        st.caption(t("fb_setup"))
+    else:
+        st.caption(t("fb_target", page=fbc["page_id"]))
+        blocks = []
+        if meta and (meta["name"] != product_name or meta["aff"] != aff_link.strip()
+                     or meta["price"] != cp.fmt_price(product_price)):
+            blocks.append(t("fb_block_stale"))
+        if "{" in post_text or "}" in post_text:
+            blocks.append(t("fb_block_placeholder"))
+        if cp.clean_profanity(post_text)[1]:
+            blocks.append(t("fb_block_profanity"))
+        for b in blocks:
+            notice("error", b)
+        risky = cp.find_risky(post_text)
+        if risky:
+            notice("warning", t("fb_risky", words=", ".join(w for hits in risky.values() for w in hits)))
+        use_imgs = st.checkbox(t("fb_use_imgs", n=min(len(chosen_imgs), publish.MAX_PHOTOS)),
+                               value=bool(chosen_imgs), disabled=not chosen_imgs, key="fb_use_imgs")
+        use_vid = st.checkbox(t("fb_use_video"), value=False, key="fb_use_vid") if mp4s else False
+        confirmed = st.checkbox(t("fb_confirm"), key="fb_confirm")
+        if st.button(t("fb_btn"), type="primary", use_container_width=True,
+                     disabled=bool(blocks) or not confirmed):
+            digest = hashlib.sha256(post_text.strip().encode("utf-8")).hexdigest()
+            done = st.session_state.setdefault("posted_hashes", set())
+            if digest in done:
+                notice("warning", t("fb_dup"))
+            elif not _post_limiter().allow():
+                notice("error", t("fb_limit", n=int(secret("POST_DAILY_LIMIT", 10))))
+            else:
+                with st.spinner("..."):
+                    res = publish.post_to_page(
+                        fbc, post_text, chosen_imgs if (use_imgs and not use_vid) else (),
+                        mp4s[0] if use_vid else None)
+                if res["ok"]:
+                    done.add(digest)
+                    st.session_state["fb_confirm"] = False
+                    notice("success", t("fb_ok"))
+                    if res.get("photos"):
+                        st.caption(t("fb_ok_photos", n=res["photos"]))
+                    if res.get("photos_failed"):
+                        notice("warning", t("fb_photos_failed", n=res["photos_failed"]))
+                    if res.get("link"):
+                        st.link_button(t("fb_open_post"), res["link"])
+                else:
+                    msg = t(f"fbe_{res['code']}")
+                    notice("error", msg + (f" ({res['detail']})" if res.get("detail") else ""))
+
+# ---------------------------------------------------------------
 # โหมดหลายสินค้า
 # ---------------------------------------------------------------
 st.markdown(f"<div class='laz-sec'>{escape(t('batch_title'))}</div>", unsafe_allow_html=True)
 st.caption(t("batch_help", max=BATCH_MAX))
 batch_text = st.text_area(t("batch_label"), key="batch_text", height=130, placeholder=t("batch_ph"))
+
+
+def cached_product_for_batch(prod, store):
+    return cached_product(store, prod)
 
 
 def run_batch(text):
@@ -586,16 +735,20 @@ def run_batch(text):
     popts = cp.platform_opts(platform)
     clean_sig, _ = cp.clean_profanity(signature)
 
-    def build_fn(name, price, aff):
+    for item in items:
+        item["store"] = store_choice if store_choice != stores.AUTO else (stores.detect_store(item["prod"]) or "lazada")
+
+    def build_fn(name, price, aff, store):
         cname, _ = cp.clean_profanity(name)
         cat = cp.detect_category(cname)
-        cap = cp.build_caption(tone, cat, cname, "", price, "", aff, link_header, False, disclose,
+        header = link_header if store == eff_store else default_header(store)
+        cap = cp.build_caption(tone, cat, cname, "", price, "", aff, header, False, disclose,
                                signature=clean_sig, max_tags=popts["max_tags"],
-                               link_mode=popts["link_mode"])
+                               link_mode=popts["link_mode"], store=store)
         return cap, cat
 
-    def validate_fn(aff, prod, name, price, cat):
-        checks = cp.validate_inputs(aff, prod, name, price, "-", cat, True)
+    def validate_fn(aff, prod, name, price, cat, store):
+        checks = cp.validate_inputs(aff, prod, name, price, "-", cat, True, store=store)
         return checks + cp.risky_checks(name)
 
     results = []
@@ -605,7 +758,7 @@ def run_batch(text):
         if not fetch_allowed():
             msgs.append(("warning", t("batch_stopped", i=i)))
             break
-        results.append(batch.process_item(item, cached_product, build_fn, validate_fn))
+        results.append(batch.process_item(item, cached_product_for_batch, build_fn, validate_fn))
     if bar:
         bar.empty()
     st.session_state["batch_results"] = {"msgs": msgs, "results": results}
@@ -625,6 +778,7 @@ if br:
         for i, r in enumerate(br["results"], 1):
             title = cp.short_name(r["name"], 60) or t("batch_noname")
             st.markdown(f"**{t('batch_item', i=i, name=title)}**")
+            st.caption(t(f"store_{r['store']}"))
             if r["fetch_error"]:
                 notice("warning", t("batch_fetch_err", reason=reason_text(r["fetch_error"], r["http"])))
             render_checks(r["checks"], levels=("error", "warning"))
