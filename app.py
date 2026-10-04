@@ -13,6 +13,7 @@ import batch
 import captions as cp
 import guard
 import library
+import autopoint
 import media
 import publish
 import shopee_api
@@ -341,24 +342,36 @@ with left:
         if gen:
             notice("success", t("shopee_gen_ok")) if gen[0] == "ok" else notice("error", t("shopee_gen_err", reason=gen[1]))
 
-    if st.button(t("fetch_btn"), use_container_width=True):
-        if not prod_link.strip():
-            notice("error", t("need_prod_link"))
-        elif not fetch_allowed():
+    def apply_fetch(url):
+        """ดึงข้อมูลสินค้า แล้วเติมช่องชื่อ/ราคา/จุดเด่น/โปรโมชันให้เอง คืน True ถ้าได้เรียกดึงจริง"""
+        if not url.strip():
+            notice("error", t("need_any_link"))
+            return False
+        if not fetch_allowed():
             notice("error", t("fetch_limited"))
-        else:
-            with st.spinner(t("fetching")):
-                info = cached_product(eff_store, prod_link.strip())
-            st.session_state["info"] = info
-            st.session_state["zip"] = None
-            # สินค้าใหม่ = ล้างของเก่า กันก๊อปข้อความสินค้าก่อนหน้า
-            st.session_state["product_name"] = info["title"]
-            st.session_state["product_price"] = cp.fmt_price(info["price"])
-            st.session_state["product_point"] = ""
-            st.session_state["promo"] = ""
-            st.session_state.pop("captions", None)
-            st.session_state.pop("caption_meta", None)
-            st.session_state.pop("checks", None)
+            return False
+        with st.spinner(t("fetching")):
+            fetched = cached_product(eff_store, url.strip())
+        st.session_state["info"] = fetched
+        st.session_state["zip"] = None
+        # สินค้าใหม่ = ล้างของเก่า กันก๊อปข้อความสินค้าก่อนหน้า แล้วเติมค่าที่ได้จากข้อมูลจริง
+        st.session_state["product_name"] = fetched["title"]
+        st.session_state["product_price"] = cp.fmt_price(fetched["price"])
+        auto_point, auto_promo = autopoint.suggest(fetched)
+        st.session_state["product_point"] = auto_point
+        st.session_state["promo"] = auto_promo
+        st.session_state["auto_filled"] = bool(auto_point or auto_promo)
+        st.session_state.pop("captions", None)
+        st.session_state.pop("caption_meta", None)
+        st.session_state.pop("checks", None)
+        return True
+
+    if st.button(t("quick_btn"), type="primary", use_container_width=True):
+        if apply_fetch(prod_link.strip() or aff_link.strip()):
+            st.session_state["_auto_gen"] = True  # ดึงเสร็จแล้วสร้างแคปชั่นต่อทันที (ทำท้ายหน้า)
+    st.caption(t("quick_hint"))
+    if st.button(t("fetch_btn"), use_container_width=True):
+        apply_fetch(prod_link.strip() or aff_link.strip())
 
     info = st.session_state.get("info")
     if info:
@@ -380,6 +393,8 @@ with left:
         product_price = st.text_input(t("price_label"), key="product_price", placeholder=t("price_ph"))
     with c2:
         promo = st.text_input(t("promo_label"), key="promo", placeholder=t("promo_ph"))
+    if st.session_state.get("auto_filled"):
+        st.caption(t("auto_filled_note"))
 
     detected = cp.detect_category(f"{product_name} {product_point}")
     AUTO = "__auto__"
@@ -474,6 +489,8 @@ with left:
         go_free = st.button(t("gen_free"), type="primary", use_container_width=True)
         go_ai = False
 
+    if st.session_state.pop("_auto_gen", False):
+        run_generation(False)
     if go_free:
         run_generation(False)
     if go_ai:

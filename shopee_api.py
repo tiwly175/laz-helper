@@ -223,7 +223,7 @@ def _walk(o):
 
 def parse_item_json(data, cc="th"):
     """ดึง title/price/images/videos จาก JSON ของหน้าสินค้า (โครงสร้างยืดหยุ่น)"""
-    out = {"title": "", "price": "", "images": [], "videos": []}
+    out = {"title": "", "price": "", "images": [], "videos": [], "orig_price": "", "discount": 0}
     for d in _walk(data):
         if not out["title"] and isinstance(d.get("name"), str) and ("itemid" in d or "item_id" in d):
             out["title"] = media.clean_title(d["name"])
@@ -231,6 +231,12 @@ def parse_item_json(data, cc="th"):
             raw = d.get("price_min") or d.get("price")
             if isinstance(raw, (int, float)) and raw > 1000:
                 out["price"] = str(int(round(raw / 100000)))
+        if not out["orig_price"]:
+            before = d.get("price_before_discount") or d.get("price_min_before_discount")
+            now = d.get("price_min") or d.get("price")
+            if isinstance(before, (int, float)) and isinstance(now, (int, float)) and before > now > 1000:
+                out["orig_price"] = str(int(round(before / 100000)))
+                out["discount"] = int(round((1 - now / before) * 100))
         for key in ("image", "images"):
             v = d.get(key)
             for h in ([v] if isinstance(v, str) else v if isinstance(v, list) else []):
@@ -268,11 +274,13 @@ def fetch_public_extras(shop_id, item_id, url):
     host = _site_host(url)
     cc = _cc(host)
     page_url = f"https://{host}/product/{shop_id}/{item_id}"
-    out = {"title": "", "price": "", "images": [], "videos": []}
+    out = {"title": "", "price": "", "images": [], "videos": [], "orig_price": "", "discount": 0}
 
     def merge(part):
         out["title"] = out["title"] or part.get("title", "")
         out["price"] = out["price"] or part.get("price", "")
+        out["orig_price"] = out["orig_price"] or part.get("orig_price", "")
+        out["discount"] = out["discount"] or part.get("discount", 0)
         out["images"] += part.get("images", [])
         out["videos"] += part.get("videos", [])
 
@@ -299,6 +307,8 @@ def fetch_public_extras(shop_id, item_id, url):
                 ex = media.extract_media(html)
                 part["title"] = ex.get("title", "")
                 part["price"] = ex.get("price", "")
+                part["orig_price"] = ex.get("orig_price", "")
+                part["discount"] = ex.get("discount", 0)
                 part["videos"] = [v["url"] for v in ex.get("videos", [])]
             except Exception:
                 pass
@@ -320,7 +330,8 @@ def fetch_shopee(url_or_text, creds):
     """รูปแบบผลลัพธ์เหมือน media.fetch_product (title, price, images, videos, error, http, url)
     API ทางการให้รูปหลักรูปเดียว: เสริมรูป/วิดีโออีกจากข้อมูลสาธารณะของหน้าสินค้าเท่าที่ดึงได้
     ไม่มี Secrets ก็ยังลองดึงจากข้อมูลสาธารณะได้ (ไม่ได้รับประกัน)"""
-    info = {"title": "", "price": "", "images": [], "videos": [], "error": "", "http": "", "url": ""}
+    info = {"title": "", "price": "", "images": [], "videos": [], "error": "", "http": "", "url": "",
+            "orig_price": "", "discount": 0, "rating": "", "reviews": ""}
     url = media.extract_first_url(url_or_text)
     info["url"] = url
     if not url:
@@ -365,6 +376,7 @@ def fetch_shopee(url_or_text, creds):
 
     info["title"] = info["title"] or extra["title"]
     info["price"] = info["price"] or extra["price"]
+    info["orig_price"], info["discount"] = extra.get("orig_price", ""), extra.get("discount", 0)
     info["images"] = _dedupe(api_images + extra["images"])[:media.MAX_IMAGES]
     vids = _dedupe(extra["videos"])[:media.MAX_VIDEOS]
     info["videos"] = [{"url": v, "kind": "mp4" if media._ext(v) in ("mp4", "mov", "webm") else "hls"} for v in vids]

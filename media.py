@@ -255,6 +255,93 @@ def _price_from_fields(fields):
     return ""
 
 
+def _num(v):
+    """'฿1,299.00' / 1299 -> float หรือ None"""
+    d = _digits_price(str(v).replace(",", ""))
+    try:
+        return float(d) if d else None
+    except ValueError:
+        return None
+
+
+def _fmt_plain(x):
+    return str(int(x)) if x is not None and float(x).is_integer() else (f"{x:.2f}".rstrip("0").rstrip(".") if x is not None else "")
+
+
+def _walk_dicts(obj, depth=0):
+    if depth > 14:
+        return
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from _walk_dicts(v, depth + 1)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _walk_dicts(v, depth + 1)
+
+
+def _price_facts(fields, page, sale_hint=""):
+    """ราคาปกติ/ส่วนลด/คะแนนรีวิว จากโครงข้อมูล + regex สำรอง (โครงอาจเปลี่ยน จึงห่อ try ทุกจุด)
+    คืน dict: price, orig_price, discount(int %), rating(float|''), reviews(int|'')"""
+    out = {"price": "", "orig_price": "", "discount": 0, "rating": "", "reviews": ""}
+    sale = _num(sale_hint)
+    orig = None
+    try:
+        for d in _walk_dicts(fields):
+            sp, op = d.get("salePrice"), d.get("originalPrice")
+            if isinstance(sp, dict) or isinstance(op, dict):
+                if sale is None and isinstance(sp, dict):
+                    sale = _num(sp.get("value")) or _num(sp.get("text"))
+                if orig is None and isinstance(op, dict):
+                    orig = _num(op.get("value")) or _num(op.get("text"))
+        if orig is None or sale is None:
+            m = re.search(r'"originalPrice"\s*:\s*\{[^{}]*?"value"\s*:\s*"?([\d.]+)', page)
+            if m and orig is None:
+                orig = _num(m.group(1))
+            m = re.search(r'"salePrice"\s*:\s*\{[^{}]*?"value"\s*:\s*"?([\d.]+)', page)
+            if m and sale is None:
+                sale = _num(m.group(1))
+        if orig is None:
+            m = re.search(r'"(?:pdt_)?(?:origin(?:al)?_?[pP]rice|price_before_discount|marketPrice)"\s*:\s*"?[^\d"]*([\d,]+(?:\.\d+)?)', page)
+            if m:
+                orig = _num(m.group(1))
+    except Exception:
+        pass
+    pct = 0
+    try:
+        if orig and sale and orig > sale > 0:
+            pct = int(round((1 - sale / orig) * 100))
+        else:
+            m = re.search(r'"(?:pdt_)?discount"\s*:\s*"-?\s*(\d{1,2})\s*%', page)
+            if m:
+                pct = int(m.group(1))
+    except Exception:
+        pct = 0
+    if 0 < pct < 95:
+        out["discount"] = pct
+    if orig and sale and orig > sale:
+        out["orig_price"] = _fmt_plain(orig)
+    if sale:
+        out["price"] = _fmt_plain(sale)
+    try:
+        for p in _jsonld_products(page):
+            ar = p.get("aggregateRating")
+            if isinstance(ar, dict):
+                rv, rc = _num(ar.get("ratingValue")), _num(ar.get("reviewCount") or ar.get("ratingCount"))
+                if rv and 0 < rv <= 5:
+                    out["rating"] = round(rv, 1)
+                if rc:
+                    out["reviews"] = int(rc)
+                break
+        if not out["rating"]:
+            m = re.search(r'"ratingScore"\s*:\s*"?([\d.]+)', page)
+            if m and _num(m.group(1)) and 0 < _num(m.group(1)) <= 5:
+                out["rating"] = round(_num(m.group(1)), 1)
+    except Exception:
+        pass
+    return out
+
+
 def item_id_from_url(url):
     m = re.search(r"-i(\d+)(?:-s(\d+))?\.html", url or "")
     return m.group(1) if m else ""
@@ -263,7 +350,8 @@ def item_id_from_url(url):
 def extract_media(raw_html):
     """คืน dict: title, price, images(list), videos(list ของ {url, kind})"""
     page = normalize_page(raw_html or "")
-    info = {"title": "", "price": "", "images": [], "videos": []}
+    info = {"title": "", "price": "", "images": [], "videos": [],
+            "orig_price": "", "discount": 0, "rating": "", "reviews": ""}
     imgs, vids = [], []
 
     mod = _json_after(page, r"window\.__moduleData__\s*=\s*")
@@ -325,6 +413,13 @@ def extract_media(raw_html):
     for u in re.findall(r'(?:https?:)?//[^"\'\s\\<>]+?\.(?:mp4|m3u8)[^"\'\s\\<>]*', page, re.I):
         vids.append(norm_video(u))
 
+    facts = _price_facts(fields if isinstance(fields, dict) else {}, page, info["price"])
+    for k, v in facts.items():
+        if v and not info.get(k):
+            info[k] = v
+    if not info["price"] and facts["price"]:
+        info["price"] = facts["price"]
+
     info["images"] = _unique(i for i in imgs if i)[:MAX_IMAGES]
     uv = _unique(v for v in vids if v)
     uv.sort(key=lambda v: _ext(v) != "mp4")  # mp4 ก่อน (ดาวน์โหลดได้)
@@ -375,7 +470,8 @@ ENOUGH_IMAGES = 8  # ได้รูปถึงเท่านี้แล้�
 def fetch_product(url_or_text, fetcher=None):
     """จุดเข้าหลัก คืน dict พร้อม error code ('' ถ้าสำเร็จ)
     fetcher: ฟังก์ชันดึงหน้าเว็บ (ค่าเริ่มต้น = Lazada: ลองหลาย UA แล้วรวมรูป/คลิปจากทุกหน้าที่ได้)"""
-    info = {"title": "", "price": "", "images": [], "videos": [], "error": "", "http": "", "url": ""}
+    info = {"title": "", "price": "", "images": [], "videos": [], "error": "", "http": "", "url": "",
+            "orig_price": "", "discount": 0, "rating": "", "reviews": ""}
     url = extract_first_url(url_or_text)
     info["url"] = url
     if not url:
@@ -400,6 +496,8 @@ def fetch_product(url_or_text, fetcher=None):
             ex = extract_media(page)
             info["title"] = info["title"] or ex.get("title", "")
             info["price"] = info["price"] or ex.get("price", "")
+            for k in ("orig_price", "discount", "rating", "reviews"):
+                info[k] = info[k] or ex.get(k, info[k])
             info["images"] = _unique(info["images"] + ex.get("images", []))[:MAX_IMAGES]
             for v in ex.get("videos", []):
                 if v["url"].split("?")[0] not in seen_vid:
