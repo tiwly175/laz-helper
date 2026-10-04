@@ -343,28 +343,83 @@ def _unique(items):
     return out
 
 
+def iter_lazada_pages(url):
+    """ดึงหน้าเดียวกันด้วย UA หลายแบบ ทีละแบบ (เดสก์ท็อปก่อน เพราะมักมีแกลเลอรีเต็มกว่าหน้ามือถือ)
+    คืนทีละ (html, final_url, error_code) ไม่หยุดที่หน้าแรกที่ได้"""
+    host = urlparse(url).hostname or ""
+    if not is_lazada_host(host):
+        raise FetchError("not_lazada")
+    for ua in (UA_DESKTOP, UA_MOBILE, UA_ANDROID):
+        try:
+            r = safe_get(url, _headers(ua))
+        except FetchError as e:
+            if e.code in ("unsafe", "not_lazada"):
+                raise
+            yield "", url, e.code
+            continue
+        text = r.text or ""
+        final = getattr(r, "final_url", url)
+        if r.status_code != 200:
+            yield text, final, f"http_{r.status_code}"
+        elif _is_captcha(text):
+            yield text, final, "captcha"
+        elif len(text) < 500:
+            yield text, final, "empty"
+        else:
+            yield text, final, ""
+
+
+ENOUGH_IMAGES = 8  # ได้รูปถึงเท่านี้แล้วไม่ต้องลอง UA ถัดไป
+
+
 def fetch_product(url_or_text, fetcher=None):
     """จุดเข้าหลัก คืน dict พร้อม error code ('' ถ้าสำเร็จ)
-    fetcher: ฟังก์ชันดึงหน้าเว็บ (ค่าเริ่มต้น = ของ Lazada)"""
+    fetcher: ฟังก์ชันดึงหน้าเว็บ (ค่าเริ่มต้น = Lazada: ลองหลาย UA แล้วรวมรูป/คลิปจากทุกหน้าที่ได้)"""
     info = {"title": "", "price": "", "images": [], "videos": [], "error": "", "http": "", "url": ""}
     url = extract_first_url(url_or_text)
     info["url"] = url
     if not url:
         info["error"] = "empty"
         return info
+
+    def pages():
+        if fetcher is not None:
+            yield fetcher(url)
+        else:
+            yield from iter_lazada_pages(url)
+
+    last_err, got_page = "", False
+    seen_vid = set()
     try:
-        page, final, err = (fetcher or fetch_page)(url)
+        for page, final, err in pages():
+            if err:
+                last_err = err
+            if not page or err in ("captcha", "empty") or err.startswith("http_") and not page:
+                continue
+            got_page = True
+            ex = extract_media(page)
+            info["title"] = info["title"] or ex.get("title", "")
+            info["price"] = info["price"] or ex.get("price", "")
+            info["images"] = _unique(info["images"] + ex.get("images", []))[:MAX_IMAGES]
+            for v in ex.get("videos", []):
+                if v["url"].split("?")[0] not in seen_vid:
+                    seen_vid.add(v["url"].split("?")[0])
+                    info["videos"].append(v)
+            info["videos"] = info["videos"][:MAX_VIDEOS]
+            if len(info["images"]) >= ENOUGH_IMAGES:
+                break
     except FetchError as e:
         info["error"] = e.code
         return info
-    if err.startswith("http_"):
-        info["error"], info["http"] = "http", err[5:]
-    elif err:
-        info["error"] = err
-    if page:
-        info.update({k: v for k, v in extract_media(page).items()})
-        if not info["title"] and not info["images"] and not info["error"]:
-            info["error"] = "nodata"
+
+    has_data = bool(info["title"] or info["images"] or info["videos"])
+    if not has_data and last_err:
+        if last_err.startswith("http_"):
+            info["error"], info["http"] = "http", last_err[5:]
+        else:
+            info["error"] = last_err
+    elif not has_data and got_page:
+        info["error"] = "nodata"
     return info
 
 
