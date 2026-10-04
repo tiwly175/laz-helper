@@ -83,6 +83,8 @@ def reset_all():
 def reason_text(code, http=""):
     if code == "http":
         return t("err_http", code=http)
+    if code == "no_ids" and http:
+        return t("err_no_ids") + f" [{http}]"
     return t(f"err_{code}") if f"err_{code}" in STR["th"] else t("err_conn")
 
 

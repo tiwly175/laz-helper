@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 import time
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -82,21 +82,92 @@ def _creds_ok(creds):
     return bool(creds and creds.get("app_id") and creds.get("secret"))
 
 
-def _resolve_ids(url):
-    """หา shopId/itemId จากลิงก์ ถ้าเป็นลิงก์สั้นให้ตามรีไดเรกต์ก่อน"""
-    ids = parse_ids(url)
-    if ids:
-        return ids
-    host = urlparse(url).hostname or ""
-    if SHORT_HOST_RE.match(host):
-        try:
-            r = media.safe_get(url, {"User-Agent": media.UA_MOBILE}, stream=True)
-            final = getattr(r, "final_url", url)
-            r.close()
-            return parse_ids(final)
-        except media.FetchError:
-            return None
+ID_KEYS = (("shop_?id", "item_?id"), ("item_?id", "shop_?id"))
+
+
+def _ids_from_text(text):
+    """หา (shop_id, item_id) จากข้อความ/URL ใดๆ: รูปแบบ path, -i.S.I, พารามิเตอร์ shopid/itemid,
+    และลิงก์ที่ซ้อนอยู่ในพารามิเตอร์ (เช่น redirect=...)"""
+    from urllib.parse import unquote
+    t = text or ""
+    for _ in range(3):  # ถอดรหัส %xx ซ้อนกันได้ไม่เกิน 3 ชั้น
+        ids = parse_ids(t)
+        if ids:
+            return ids
+        for first, second in ID_KEYS:
+            m = re.search(r"%s[\"'\s]*[:=][\"'\s]*(\d{3,})[\s\S]{0,80}?%s[\"'\s]*[:=][\"'\s]*(\d{3,})" % (first, second), t, re.I)
+            if m:
+                a_, b_ = m.group(1), m.group(2)
+                return (int(a_), int(b_)) if first.startswith("shop") else (int(b_), int(a_))
+        nt = unquote(t)
+        if nt == t:
+            break
+        t = nt
     return None
+
+
+def resolve_ids_debug(url):
+    """คืน (ids|None, diag) ตามลิงก์สั้นทีละทอด (ตรวจ IP ทุกทอด) ดูทั้ง URL ของทอด, Location และเนื้อหาหน้า
+    diag = ข้อความสั้นๆ ไว้วินิจฉัย (ชื่อโฮสต์/สถานะเท่านั้น ไม่มีพารามิเตอร์)"""
+    ids = _ids_from_text(url)
+    if ids:
+        return ids, ""
+    host0 = urlparse(url).hostname or ""
+    if not is_shopee_host(host0):
+        return None, ""
+    trail = [host0]
+    last_status = ""
+    for ua in (media.UA_MOBILE, media.UA_DESKTOP):
+        cur = url
+        for _ in range(6):
+            try:
+                media.check_public_url(cur)
+                r = requests.get(cur, headers={"User-Agent": ua, "Accept-Language": "th-TH,th;q=0.9",
+                                               "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+                                 timeout=12, stream=True, allow_redirects=False)
+            except media.FetchError:
+                last_status = "blocked"
+                break
+            except requests.RequestException:
+                last_status = "conn"
+                break
+            try:
+                last_status = str(r.status_code)
+                loc = r.headers.get("Location") or ""
+                if r.status_code in (301, 302, 303, 307, 308) and loc:
+                    nxt = urljoin(cur, loc)
+                    ids = _ids_from_text(nxt)
+                    if ids:
+                        return ids, ""
+                    h = urlparse(nxt).hostname or ""
+                    trail.append(h)
+                    if not is_shopee_host(h):
+                        break  # ไม่ตามออกนอก Shopee
+                    cur = nxt
+                    continue
+                if r.status_code == 200 and is_shopee_host(urlparse(cur).hostname or ""):
+                    raw = b"".join(c for _, c in zip(range(8), r.iter_content(64 * 1024)))
+                    body = raw.decode("utf-8", errors="replace").replace("\\u002F", "/").replace("\\/", "/")
+                    ids = _ids_from_text(body)
+                    if ids:
+                        return ids, ""
+                    # meta refresh / canonical / og:url / location.href ที่ชี้ไปหน้าสินค้า
+                    for m in re.finditer(r"(?:url=|href=|content=|location(?:\.href)?\s*=)\s*[\"']?(https?://[^\"'\s<>]+)", body, re.I):
+                        ids = _ids_from_text(m.group(1))
+                        if ids:
+                            return ids, ""
+                break
+            finally:
+                r.close()
+    seen = []
+    for h in trail:
+        if h not in seen:
+            seen.append(h)
+    return None, " → ".join(seen) + (f" ({last_status})" if last_status else "")
+
+
+def _resolve_ids(url):
+    return resolve_ids_debug(url)[0]
 
 
 def _price(node):
@@ -258,9 +329,10 @@ def fetch_shopee(url_or_text, creds):
     if not is_shopee_host(urlparse(url).hostname or ""):
         info["error"] = "not_shopee"
         return info
-    ids = _resolve_ids(url)
+    ids, diag = resolve_ids_debug(url)
     if not ids:
         info["error"] = "no_ids"
+        info["http"] = diag  # ข้อความวินิจฉัยสั้นๆ แสดงต่อท้ายข้อความผิดพลาด
         return info
     shop_id, item_id = ids
 
